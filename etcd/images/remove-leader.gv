@@ -1,0 +1,59 @@
+digraph routines {
+  ranksep=0.25
+  node [shape=plaintext]
+  leader [label=<
+  <TABLE BORDER="0" CELLSPACING="0">
+    <TR>
+      <TD BORDER="1" port="name">leader   </TD>
+      <TD BORDER="1">=======&gt;</TD>
+      <TD BORDER="1" port="leaderAccpet">accept c1</TD>
+      <TD BORDER="1">===&gt;</TD>
+      <TD BORDER="1">broadcast &amp; append c1</TD>
+      <TD BORDER="1" port="leaderReject">============&gt;</TD>
+      <TD BORDER="1" port="caution">commit c1; broadcast</TD>
+      <TD BORDER="1">=&gt;</TD>
+      <TD BORDER="1" port="leaderApply">apply c1</TD>
+      <TD BORDER="1">stop node once applied</TD>
+    </TR>
+  </TABLE>>]
+
+  follower1 [label=<
+  <TABLE BORDER="0" CELLSPACING="0">
+    <TR>
+      <TD port="name" BORDER="1">follower</TD>
+      <TD BORDER="1">=======================&gt;</TD>
+      <TD BORDER="1">append c1</TD>
+      <TD BORDER="1">===&gt;</TD>
+      <TD BORDER="1">ack c1</TD>
+      <TD BORDER="1">===========================&gt;</TD>
+      <TD BORDER="1">apply c1</TD>
+      <TD BORDER="1">==========&gt;</TD>
+      <TD BORDER="1">start election</TD>
+    </TR>
+  </TABLE>>]
+
+  follower2 [label=<
+  <TABLE BORDER="0" CELLSPACING="0">
+    <TR>
+      <TD port="name" BORDER="1">follower</TD>
+      <TD BORDER="1">==============================&gt;</TD>
+      <TD BORDER="1">append c1</TD>
+      <TD BORDER="1">===&gt;</TD>
+      <TD BORDER="1">ack c1</TD>
+      <TD BORDER="1">=====================&gt;</TD>
+      <TD BORDER="1">apply c1</TD>
+      <TD BORDER="1">=========&gt;</TD>
+      <TD BORDER="1">start election</TD>
+    </TR>
+  </TABLE>>]
+
+  ccrequest [shape=box label="c1: remove current leader, accepted"]
+  caution [shape=box label="caution: the leader is not included in majority, cannot commit until other two nodes ack cc"]
+  {rank = same; leader}
+  {rank = same; follower1}
+  {rank = same; follower2}
+
+  leader:name:sw -> follower1:name:sw -> follower2:name:sw [style=invis]
+  ccrequest -> leader:leaderAccpet:nw
+  caution -> leader:caution:nw [arrowhead=none]
+}

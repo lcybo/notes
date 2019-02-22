@@ -1,0 +1,67 @@
+digraph "V3_put_to_follower" {
+  ranksep=0.75
+  subgraph "cluster_client_listener" {
+    label="client listener v2v3 adapter"
+    fcl -> fv2v3 -> fv3client -> fcsa -> fv3server
+  }
+  // verteces 
+  // (f) stand for follower; (l) stand for leader; 
+  client [shape=box]
+  fcl [shape=ellipse label="(f)client-listener"]
+  fv2v3 [shape=trapezium style=default label="(f)v2-to-v3-adapter"]
+  fv3client [shape=box label="(f)embedded-v3-client"]
+  fcsa [shape=trapezium style=default label="(f)kvc-kvs-adapter"]
+  fv3server [shape=box label="(f)embedded-v3-server"]
+  pendings [shape=record label="<f1>waiting ids|<f2>..."]
+  fraft [shape=square label="(f)raft-node"]
+  fstepr [shape=circle label="(f)step-routine"]
+  fraftr [shape=circle label="(f)raft-routine"]
+  fpl [shape=ellipse label="(f)peer-listener"]
+  lpl [shape=ellipse label="(l)peer-listener"]
+  lraft [shape=square label="(l)raft-node"]
+  lstepr [shape=circle label="(l)step-routine"]
+  lraftr [shape=circle label="(l)raft-routine"]
+  fwal [shape=box3d label="(f)wal"]
+  lwal [shape=box3d label="(l)wal"]
+  fmvcc [shape=box3d label="(f)mvcc"]
+  lmvcc [shape=box3d label="(l)mvcc"]
+  fappr [shape=circle label="(f)apply-routine"]
+  lappr [shape=circle label="(l)apply-routine"]
+  committed [shape=box3d label="raft-log"]
+
+  //edges
+  client -> fcl [label=<<TABLE border="0" cellborder="1"><TR><TD>Key</TD><TD>Value</TD></TR></TABLE>>]
+  //fcl -> fv2v3 -> fv3client -> fcsa -> fv3server
+  fv3server -> fraft [label="proposal"] 
+  fv3server -> pendings [arrowhead=crow label="register\nwait"]
+  fraft -> fstepr [label="proposal\nchan"]
+  fstepr -> fraftr [label="stepFollower\n(msgProp)\nnotify\nreadyc"]
+  fraft -> fstepr [label="recv\nchan" color=green]
+  fstepr -> fraftr [label="stepFollower\n(msgApp)\nnotify\nreadyc" color=green]
+  fraftr -> fappr [label="apply\nchan" color=blue4]
+  fappr -> fmvcc [label="apply quorum\ncommitted entries" color=blue4]
+  fraftr -> fwal [label="append\nlog entries\nto wal" color=green]
+  fraftr -> lpl [label="forward\nproposal"]
+  lpl -> lraft
+  lraft -> lstepr  [label="proposal\nchan"]
+  lstepr -> lraftr [label="stepLeader\n(msgPro => msgApp)\nnotify\nreadyc" color=green]
+  lraftr -> fpl [label="broadcast\nmsgApp"  color=green]
+  lraftr -> lappr [label="apply\nchan" color=blue4]
+  lappr -> lmvcc [label="apply quorum\ncommitted entries." color=blue4]
+  lraftr -> lwal [label="append\nlog entries\nto wal" color=green]
+  fpl -> fraft [color=green]
+  fraftr -> lpl [label="send\nmsgAppResp\n(behind of wal)" color=red]
+  lpl -> lraft [color=red]
+  lraft -> lstepr [label="recv\nchan" color=red]
+  lstepr -> committed [label="commit\nif up to quorum"  color=blue4]
+  fappr -> pendings [arrowhead=curve label="trigger\nupon applying" color=blue4]
+
+  { rank = same; "fpl" -> "lpl"[style=invis]}
+  { rank = same; "fraft"; "lraft"; }
+  { rank = same; "fstepr"; "lstepr"; }
+  { rank = same; "fraftr"; "lraftr"; }
+  { rank = same; "fappr"; "lappr"; }
+  { rank = same; "fmvcc"; "lmvcc"; }
+  { rank = same; "fwal"; "lwal"; }
+
+} 

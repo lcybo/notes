@@ -1,0 +1,15 @@
+digraph routines {
+  ranksep=1.0
+  nl [shape="ellipse" label="net-listeners(peer,client)"]
+  sr [shape="record" label="<name>step-routine|<crdy>ready|<cprop>proposal|<crecv>receive|<cconf>config|<cadv>advance|<cstop>stop|<>others"]
+  ar [shape="record" label="<name>apply-routine|<capp>apply|<cepl>expiredLease|<cgsyn>getSync|<cstop>stop|<>others"]
+  rr [shape="record" label="<name>raft-routine|<crdy>ready|<>others"]
+  sr:name -> rr:name -> ar:name [style=invis]
+  nl -> sr:cprop
+  nl -> sr:crecv
+  sr:crdy -> rr:crdy
+  rr:crdy -> ar:capp
+  sr:cprop:s -> sr:crdy:n
+  sr:crecv:s -> sr:crdy:n
+  rr:crdy:s -> sr:cadv:n
+}

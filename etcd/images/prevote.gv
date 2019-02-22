@@ -1,0 +1,15 @@
+digraph preVote {
+  node [shape=box]
+  candidate [label="term 1, node(candidate)"]
+  node1 [label="term 1, node"]
+  node2 [label="term 1, node"]
+  node3 [label="term 1, node"]
+  node4 [label="term 1, node"]
+  ballot [shape=note label="term 2 leader election\nballot ticket"]
+
+  candidate -> ballot [arrowhead=tee]
+  ballot -> node1
+  ballot -> node2
+  ballot -> node3
+  ballot -> node4
+}

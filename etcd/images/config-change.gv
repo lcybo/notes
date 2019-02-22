@@ -1,0 +1,67 @@
+digraph routines {
+  ranksep=0.25
+  node [shape=plaintext]
+  leader [label=<
+  <TABLE BORDER="0" CELLSPACING="0">
+    <TR>
+      <TD BORDER="1" port="name">leader   </TD>
+      <TD BORDER="1">=======&gt;</TD>
+      <TD BORDER="1" port="leaderAccpet">accept c1</TD>
+      <TD BORDER="1">===&gt;</TD>
+      <TD BORDER="1">broadcast &amp; append c1</TD>
+      <TD BORDER="1" port="leaderReject">======&gt;</TD>
+      <TD BORDER="1">commit c1; broadcast</TD>
+      <TD BORDER="1">=&gt;</TD>
+      <TD BORDER="1" port="leaderApply">apply c1</TD>
+      <TD BORDER="1">=======new config change acceptable======&gt;</TD>
+    </TR>
+  </TABLE>>]
+
+  follower1 [label=<
+  <TABLE BORDER="0" CELLSPACING="0">
+    <TR>
+      <TD port="name" BORDER="1">follower</TD>
+      <TD BORDER="1">=======================&gt;</TD>
+      <TD BORDER="1">append c1</TD>
+      <TD BORDER="1">===&gt;</TD>
+      <TD BORDER="1">ack c1</TD>
+      <TD BORDER="1">===========================&gt;</TD>
+      <TD BORDER="1">apply c1</TD>
+      <TD BORDER="1">======================&gt;</TD>
+    </TR>
+  </TABLE>>]
+
+  follower2 [label=<
+  <TABLE BORDER="0" CELLSPACING="0">
+    <TR>
+      <TD port="name" BORDER="1">follower</TD>
+      <TD BORDER="1">==============================&gt;</TD>
+      <TD BORDER="1">append c1</TD>
+      <TD BORDER="1">===&gt;</TD>
+      <TD BORDER="1">ack c1</TD>
+      <TD BORDER="1">=====================&gt;</TD>
+      <TD BORDER="1">apply c1</TD>
+      <TD BORDER="1">======================&gt;</TD>
+    </TR>
+  </TABLE>>]
+
+  follower3 [label=<
+  <TABLE BORDER="0" CELLSPACING="0">
+    <TR>
+      <TD port="name" BORDER="1">new follower</TD>
+      <TD BORDER="1">===================&gt;</TD>
+    </TR>
+  </TABLE>>]
+
+  ccrequest1 [shape=box label="c1: add a node, accepted"]
+  ccrequest2 [shape=box label="c2: add another node, rejected due to pending cc(c1)"]
+
+  {rank = same; leader}
+  {rank = same; follower1}
+  {rank = same; follower2}
+
+  leader:name:sw -> follower1:name:sw -> follower2:name:sw [style=invis]
+  follower3:name:sw -> leader:leaderApply:nw [style=invis]
+  ccrequest1 -> leader:leaderAccpet:nw
+  ccrequest2 -> leader:leaderReject:nw
+}
