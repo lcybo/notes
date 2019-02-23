@@ -94,19 +94,52 @@ raft状态机主要通过三个go routine推动：
 
 #. follower根据MsgApp中的m.Commit, 将可执行的entries apply到状态机中，如果当前follower在已注册的wait中发现对应client请求，那么通知wait向client返回结果
 
+- 由于任意时刻，只能有一个leader，确保了\ `Election Safety`_\，稍后在raft选举中重点提及
+
+- 很显然，leader只会append新的条目到log，确保了\ `Leader Append-Only`_\
+
+- 日志条目总是从唯一的leader流向followers，进而确保了\ `State Machine Safety`_\
+
+- 仅当日志条目被写入quorum wal后，leader会提交该条目，确保了\ `Leader Completeness`_\。即使发生了network partition，日志完全的node才会在选举中获胜；任意满足quorum数量的节点中确保了完全日志的存在性
+
+- 为了简便，图1中并没有体现异常情况的处理。follower接收MsgApp时，会检查是否满足\ `Log Matching`_\，若不满足，follower在M's'g'所有follower将MsgApp中的entries写入wal，并通过MsgAppResp拒绝写入。leader在follower拒绝后将其pr设为probe。如果log已经compaction，将向follower发送snapshot
+
+以满足了这些guarantees为前提，就确保了状态机的安全性
 
 etcd read
 ---------
 
-- 如果在range request中将serializable设置为true(default false)，follower接受到请求后直接进行本地查询后返回
+- 如果在range request中将serializable设置为true(default false)，任意节点接受到请求后直接进行本地查询后返回结果
 
   * 相较于默认配置，性能有一定提升
-  * 违背了一致性承诺，有stale reads现象
+  * 违背了一致性承诺，会有stale reads现象
 
-- 默认情况下，
+- 默认情况下，官方声明read的一致性达到了linearizability. 在这种一致性模型下要求etcd对read操作在writes之间以realtime进行total ordering
+
+  * range request被forwarding到leader后，leader会给request盖上当前的committedIndex
+  
+  * follower得到committedIndex后，会等待到follower appliedIndex >= committedIndex，即将leader给予的index条目应用的状态机
+
+  * 得益于MVCC与\ `Leader Append-Only`_\, follower可以在本地状态机查询一个静态的数据集，从而达成read linearizability
+
+quorum维持与选举
+----------------
+
+leader每隔heartbeatTimeout(tick)会广播heartbeat。若启用了checkQuorum选项，并且经过electionTimeout后active的node不足quorum, leader stepdown并重新进行选举。
+
+若follower在randomizedElectionTimeout(r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout))内没有收到heartbeat, follower会将自己作为candidate(增加term)并开始选举，使用随机timeout是为了尽可能错开选举时间
+
+.. figure:: images/quorum-maintain.png
+
+   图3模拟了3个节点的etcd cluster的通信
+
+- 假设heartbeatTimeout为100ms, electionTimeout为500ms. 
+
+- node-3在tick2被隔离, randomizedElectionTimeout=600ms(为了简化图，取整数)
+
+- 
 
 
-TODO
 
 Reference
 =========
