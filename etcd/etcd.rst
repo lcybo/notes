@@ -62,11 +62,49 @@ etcd实现
 
 .. figure:: images/follower-put.png
    
-   用户通过client连接follower进行put操作
+   图1:用户通过client连接follower进行put操作
 
 .. figure:: images/main-loop.png
 
-   三个主要go routine通过channel推动raft状态机
+   图2:三个routine通过channel推动raft状态机
+
+raft状态机主要通过三个go routine推动：
+
+#. step-routine: 位于raft/node.Node.run. Event loop, 接收并处理事件，并维护mailbox(包含raft updates与待发msgs)
+
+#. raft-routine: 位于etcdserver/raft.raftNode.start. 触发tick事件，从step-routine接收就绪的raft updates并持久化到wal，发送待发msgs到对应的peers，派发apply entries到apply-routine，并通过advance channel通知step-routine已完成
+
+#. apply-routine: 位于etcdserver/server.EtcdServer.run. 接收raft-routine发送的apply entries，schedule apply到fifo队列中完成
+
+**step-routine, raft-routine, apply-routine并非官方正式命名**
+
+图1中的流程为：
+
+#. follower接收client请求，通过对应API入口，异步注册wait(等待proposal成功apply到状态机)，并proposal到自身状态机(MsgProp -> stepFollower)
+
+#. follower将MsgProp转发给当前leader
+
+#. leader将MsgProp中的entries写入wal，并同时下发包含entries的MsgApp给所有follower
+
+#. 所有follower将MsgApp中的entries写入wal，并通过MsgAppResp向leader报告
+
+#. leader接收maintain所有members的progress，称为prs，当该条日志在quorum中被报告完成(条目index低于或等于quorum progress)，leader正式提交quorum progress之前的条目
+
+#. leader将quorum committed index放入下一条MsgApp中向所有followers广播
+
+#. follower根据MsgApp中的m.Commit, 将可执行的entries apply到状态机中，如果当前follower在已注册的wait中发现对应client请求，那么通知wait向client返回结果
+
+
+etcd read
+---------
+
+- 如果在range request中将serializable设置为true(default false)，follower接受到请求后直接进行本地查询后返回
+
+  * 相较于默认配置，性能有一定提升
+  * 违背了一致性承诺，有stale reads现象
+
+- 默认情况下，
+
 
 TODO
 
