@@ -9,7 +9,7 @@ digraph routines {
       <TD BORDER="1" port="leaderAccpet">accept c1</TD>
       <TD BORDER="1">===&gt;</TD>
       <TD BORDER="1">broadcast &amp; append c1</TD>
-      <TD BORDER="1" port="leaderReject">======&gt;</TD>
+      <TD BORDER="1" port="leaderReject">===========&gt;</TD>
       <TD BORDER="1">commit c1; broadcast</TD>
       <TD BORDER="1">=&gt;</TD>
       <TD BORDER="1" port="leaderApply">apply c1</TD>
