@@ -120,25 +120,89 @@ etcd read
   
   * follower得到committedIndex后，会等待到follower appliedIndex >= committedIndex，即将leader给予的index条目应用的状态机
 
-  * 得益于MVCC与\ `Leader Append-Only`_\, follower可以在本地状态机查询一个静态的数据集，从而达成read linearizability
+  * 得益于MVCC(key对应的value可以保存多个revision)与\ `Leader Append-Only`_\, follower可以在本地状态机查询一个静态的数据集，从而达成read linearizability
 
 quorum维持与选举
 ----------------
 
-leader每隔heartbeatTimeout(tick)会广播heartbeat。若启用了checkQuorum选项，并且经过electionTimeout后active的node不足quorum, leader stepdown并重新进行选举。
+- leader每隔heartbeatTimeout(tick)会广播heartbeat。若启用了checkQuorum选项，并且经过electionTimeout后active的node不足quorum, leader stepdown并重新进行选举。
 
-若follower在randomizedElectionTimeout(r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout))内没有收到heartbeat, follower会将自己作为candidate(增加term)并开始选举，使用随机timeout是为了尽可能错开选举时间
+- 若follower在randomizedElectionTimeout(r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout))内没有收到heartbeat, follower会将自己作为candidate(增加term)并开始选举，使用随机timeout是为了防止选票分裂，造成cluster长期不可用
+
+- 为了确保\ `Election Safety`_\，follower在每个Term只能投一次赞成票
 
 .. figure:: images/quorum-maintain.png
 
-   图3模拟了3个节点的etcd cluster的通信
+   图3:3节点etcd cluster通信
 
-- 假设heartbeatTimeout为100ms, electionTimeout为500ms. 
+#. 假设heartbeatTimeout为100ms, electionTimeout为500ms. 
 
-- node-3在tick2被隔离, randomizedElectionTimeout=600ms(为了简化图，取整数)
+#. node-3在tick2被隔离, 假设其初始randomizedElectionTimeout=600ms(为了简化图，取heartbeatTimeout整数倍)
 
-- 
+#. 3节点cluster, quorum=2, majority仍能正常工作。600ms后，node-3自增term并重置randomizedElectionTimeout=900ms开始新选举，但不可能得到其他选票当选
 
+#. 700ms后，网络分区恢复，下一tick node-3重新收到node-1的heartbeat消息，消息任期m.Term < node-3.Term，node-3将回复带有node-3.Term的MsgAppResp，这将会导致leader下台
+
+#. leader接收到Term大于自己的MsgAppResp，leader下台成为follower
+
+#. node-3 randomizedElectionTimeout先到期，开始新选举。node-1, node-2重置自己的follower状态,后然进行投票，由于不满足\ `Leader Completeness`_\，node-3被其他节点否决，重置自己的follower状态
+
+#. 所有节点开始等待randomizedElectionTimeout。node-2抢先发起新选举，并赢得了选举，集群重回正轨
+
+选举优化
+--------
+
+可以观察到，节点长期处于minority分区时, Term会迅速递增。网络分区恢复后，leader因收到比自己更高Term的MsgAppResp而下台进行重新选举。如果部分节点长期处于网络不稳定的状态，会对集群可用性造成比较大的影响，这种现象被称为干扰(disruption)
+
+为了优化这个问题，etcd提供了PreVote选项：
+
+.. figure:: images/prevote.png
+
+   图4：启用prevote防止干扰
+
+candidate并不增加Term, 而在选票上填写m.Term=Term+1, 新leader成功当选，接受m.Term
+
+成员配置变更
+------------
+
+etcd支持在没有downtime的前提下执行成员变更(membership reconfiguration).
+作为infrastructure, 这是极为重要的feature.
+
+**成员数量变更时，需重新计算nquorum=member/2+1, 若当前active member未达到nquorum, etcd拒绝进行变更**
+
+#. 对于添加成员，若当前active member未达到目标nquorum, etcd拒绝请求
+
+#. 对于移除成员，若当前除目标外的active member未达到目标nquorum, etcd拒绝请求
+
+**在配置过渡期，集群会比较脆弱，尤其成员数量为偶数时**
+
+成员变更通常分为两个阶段，首先将配置变更提交到etcd cluster
+
+- 增加一个新成员
+
+.. figure:: images/config-change.png
+
+   图5：请求添加新成员
+
+#. leader先确认没有pending(即还未apply)的配置变更EntryConfChange，若存在则丢弃请求
+
+#. 和常规proposal相似，在**nquorum**(图5中为3)都写入wal后，leader提交配置条目。client在node apply配置后得到同意的回复
+
+#. 用户通过--initial-cluster指定当前集群，启动新成员
+
+#. 集群可以接收新的配置变更请求
+
+- 删除成员的过程与之类似，那么删除当前leader自己呢？
+
+.. figure:: images/remove-leader.png
+
+   图6：删除当前leader
+
+#. 配置未提交前，leader仍然管理集群，但不将自己视为nquorum的一员
+
+#. 当配置apply后，leader退位
+
+#. 当leader会阻塞一小段时间再退出集群，以防止干扰选举
 
 
 Reference
