@@ -188,8 +188,6 @@ etcd支持在没有downtime的前提下执行成员变更(membership reconfigura
 
 #. 和常规proposal相似，在**nquorum**(图5中为3)都写入wal后，leader提交配置条目。client在node apply配置后得到同意的回复
 
-#. 用户通过--initial-cluster指定当前集群，启动新成员
-
 #. 集群可以接收新的配置变更请求
 
 - 删除成员的过程与之类似，那么删除当前leader自己呢？
@@ -204,6 +202,7 @@ etcd支持在没有downtime的前提下执行成员变更(membership reconfigura
 
 #. 当leader会阻塞一小段时间再退出集群，以防止干扰选举
 
+当成员变更请求被批准后，用户可以通过指定--initial-cluster启动新成员，或停用移除的成员
 
 Reference
 =========
