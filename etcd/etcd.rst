@@ -23,7 +23,7 @@ etcd的一致性guarantees
 
 * CAP语义下：发生网络分区时，etcd牺牲可用性确保一致性，属于CP模型。
 * 一致性模型：所有操作遵循sequential consistency / serializability(txn).
-* 只读操作：在默认配置下，额外提供serializable read.
+* 只读操作：在默认配置下，额外提供linearizable read.
 
 etcd提供的一致性仅弱于linearizability / strict serializability. 在实践中，Google Spanner达到了strict serializability(也称为external consistency).
 
@@ -70,9 +70,9 @@ etcd实现
 
 raft状态机主要通过三个go routine推动：
 
-#. step-routine: 位于raft/node.Node.run. Event loop, 接收并处理事件，并维护mailbox(包含raft updates与待发msgs)
+#. step-routine: 位于raft/node.Node.run. Event loop, 接收并处理事件，并将包含的raft updates和待发msg放入mailbox(下一loop通过ready channel推送给raft-routine)
 
-#. raft-routine: 位于etcdserver/raft.raftNode.start. 触发tick事件，从step-routine接收就绪的raft updates并持久化到wal，发送待发msgs到对应的peers，派发apply entries到apply-routine，并通过advance channel通知step-routine已完成
+#. raft-routine: 位于etcdserver/raft.raftNode.start. 触发tick事件，从step-routine接收就绪的raft updates并持久化到wal，发送待发msgs到对应的peers，派发apply entries到apply-routine，并通过advance channel通知step-routine已完成处理
 
 #. apply-routine: 位于etcdserver/server.EtcdServer.run. 接收raft-routine发送的apply entries，schedule apply到fifo队列中完成
 
