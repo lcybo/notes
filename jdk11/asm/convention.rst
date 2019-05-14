@@ -1,5 +1,5 @@
 ************************
-declaration(amd64/linux)
+convention(amd64/linux)
 ************************
 
 CONSTANT_REGISTER_DECLARATION
@@ -72,3 +72,9 @@ REGISTER_DECLARATION
     REGISTER_DECLARATION(Register, j_rarg4, c_rarg5);
     REGISTER_DECLARATION(Register, j_rarg5, c_rarg0);
 
+Register assign
+
+.. code::
+
+    _locals_register(LP64_ONLY(r14) NOT_LP64(rdi))
+    _bcp_register(LP64_ONLY(r13) NOT_LP64(rsi))
