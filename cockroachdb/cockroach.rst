@@ -8,7 +8,7 @@ Preliminary
 CRDB是什么
 ----------
 
-    CockroacbDB致力于同时提供scalability和strong consistency，支持SQL的同时解决关系型数据库在cloud native下的相关问题。
+    CockroacbDB致力于同时提供scalability和strong consistency，支持SQL(pgwire)的同时解决关系型数据库在cloud native下的相关问题。
     CockroachDB源于google spanner.
 
 Spanner和TrueTime
@@ -75,6 +75,23 @@ Overview
 5. `Storage <https://www.cockroachlabs.com/docs/stable/architecture/storage-layer.html>`_ 基于RocksDB, 用于数据、元数据和辅助数据的读写
 
 
+重要概念
+=========
+
+- Range
+    CRDB切分数据的基本单元。Range的大小维持在一个区间，默认为16MB~64MB。达到上限将触发split; 反之，则触发merge.
+    Range同样是replica的基本单元，Range的多份replicas中有且仅有一个Leaseholder.
+
+- Leaseholder
+    负责处理对应Range的所有Read和Write操作。
+    对于Read操作，无需经过raft直接从MVCC读取对应版本。因此，成为Leaseholder的node必须是in-sync的。
+    对于Write操作，则需通过raft进行协调。
+    Leaseholder并不等同于raft leader, 但通常他们是共栖的(colocated), 这样可以降低非必要的通信开销。
+
+- Raft Leader & Raft log
+    参考 `etcd notes <../etcd/etcd.rst>`_
+
+
 Transaction之旅
 ================
 
@@ -83,3 +100,44 @@ Transaction之旅
 准备工作
 ---------
 
+- 从源码安装CockroachDB：
+
+.. code::
+
+    wget -qO- https://binaries.cockroachdb.com/cockroach-v19.1.1.src.tgz | tar  xvz
+    cd cockroach-v19.1.1 && make build
+    # binary文件在 ./src/github.com/cockroachdb/cockroach/cockroach
+
+- 配置一组CRDB cluster：
+
+1. 在IDE中启动第一个node,启动参数如下：
+    Environment: COCKROACH_DISTSQL_LOG_PLAN=true  (设置该参数可输出SQL执行计划URL)
+    Arguments: start --insecure --listen-addr=192.168.1.101:26257 --logtostderr=INFO
+2. 增加两个node：
+
+.. code::
+
+    cd pathToCockroachSrc/src/github.com/cockroachdb/cockroach
+    # 使用 --join=XXX 加入现有cluster
+    ./cockroach start --insecure --listen-addr=192.168.1.102:26257 --http-addr=192.168.1.102:8080 --store=node2 --join=192.168.1.101:26257
+    ./cockroach start --insecure --listen-addr=192.168.1.102:26258 --http-addr=192.168.1.102:8081 --store=node3 --join=192.168.1.101:26257
+
+访问任意节点gui可查看cluster状态，例：http://192.168.1.101:8080
+
+- 建表并populate一定量数据：
+
+.. code::
+
+    # 使用同一binary文件连接至node
+    ./cockroach sql --insecure --host=192.168.1.101:26257
+    create database bihu;
+    use bihu;
+    create table gecko (key int primary key, value varchar(1000), gid int);
+    # 写入一定量数据，省略...
+    # 可以通过experimental_ranges命令观察到数据分裂成为多个ranges
+    show experimental_ranges from table gecko; 
+      start_key | end_key | range_id | replicas | lease_holder
+    +-----------+---------+----------+----------+--------------+
+      NULL      | /112821 |       62 | {1,2,3}  |            2
+      /112821   | /225420 |       72 | {1,2,3}  |            1
+      /225420   | NULL    |       73 | {1,2,3}  |            3
