@@ -89,3 +89,21 @@ AsyncConsensus
 
 使用QueryIntentRequest确保commit之前所有的intent已经成功commit.
 
+
+
+func (ba *BatchRequest) SetActiveTimestamp(nowFn func() hlc.Timestamp)
+
+CanCreateTxnRecord
+
+fmt.Println("*****************************")
+	txn = planner.txn.GetTxnCoordMeta(ctx).Txn
+	fmt.Println(txn.OrigTimestamp)
+	fmt.Println(txn.RefreshedTimestamp)
+	fmt.Println(txn.ObservedTimestamps)
+	fmt.Println(txn.MaxTimestamp)
+	fmt.Println(txn.Timestamp)
+
+  if key.String() == "/Table/54/1/488888" {
+		fmt.Printf("Read time: %v\n", h.Timestamp)
+		fmt.Printf("Txn: %v\n", h.Txn)
+	}
