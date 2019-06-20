@@ -8,15 +8,15 @@ Preliminary
 CRDB是什么
 ----------
 
-    CockroacbDB致力于同时提供scalability和strong consistency，支持SQL(pgwire)的同时解决关系型数据库在cloud native下的相关问题。
-    CockroachDB源于google spanner.
+|   CockroacbDB致力于同时提供scalability和strong consistency，支持SQL(pgwire)的同时解决关系型数据库在cloud native下的相关问题。
+|   CockroachDB源于google spanner.
 
 Spanner和TrueTime
 -------------------
 
-    与CockroachDB相比，Spanner除上述特性外，是首个提供支持外部一致性(external-consistency)分布式事务的数据库。
-    Spanner通过TrueTime实现external-consistency.   
-    通过调用TrueTime API: TT.now(), 返回TTinterval: [earliest, latest]代表了uncertainty的上下界，取决于时钟漂移(clock-drift)的最差预估。
+|   与CockroachDB相比，Spanner除上述特性外，是首个提供支持外部一致性(external-consistency)分布式事务的数据库。
+|   Spanner通过TrueTime实现external-consistency.   
+|   通过调用TrueTime API: TT.now(), 返回TTinterval: [earliest, latest]代表了uncertainty的上下界，取决于时钟漂移(clock-drift)的最差预估。
 
 .. code::
 
@@ -30,7 +30,8 @@ Spanner和TrueTime
        +                +|
     earliest          latest
 
-假设有无关事务A(node1)与B(node2), Alice于终端提交A并在时间t1提交成功，Bob观测到A成功提交后立即提交B:
+
+假设有无关事务A(node1)与B(node2), Alice在终端提交A并在时间t1提交成功，Bob观测到A被成功提交后立即提交B:
 
 .. code::
 
@@ -53,10 +54,19 @@ Spanner和TrueTime
                      uncertainty
     通过commit wait,可以确保 t1l < t1 < t2l < t2
 
-TrueTime的局限性在于特定的环境依赖(如GCE),造成verdor lock-in.
-没有TrueTime的支持，时钟漂移通常会达到百毫秒级别，CRDB不能使用commit wait.若A, B被提交至所在节点的本地时间分别为tn1和tn2, 且tn2 < tn1. 可以观察到 B HappensBefore A 的异常(anomaly).
-因此，CRDB的一致性模型弱于external-consistency(linearizability),但达到了serializability, 即txn并不对外立即可见，对外可见后，所有观测者可以得到一致的顺序。
-CRDB使用HLC(hybird-logical clock)管理排序和因果问题。详细请看 `HLC paper <http://www.cse.buffalo.edu/tech-reports/2014-04.pdf>`_ 
+
+|   TrueTime的局限性在于特定的环境依赖(如GCE),造成verdor lock-in.
+|   没有TrueTime的支持，时钟漂移通常会达到百毫秒级别，CRDB不能使用commit wait.若A, B被提交至所在节点的本地时间分别为tn1和tn2, 且tn2 < tn1. 可以观察到 B HappensBefore A 的异常(anomaly).
+|   因此，CRDB的一致性模型弱于external-consistency(linearizability),但达到了serializability, 即txn并不对外立即可见，对外可见后，所有观测者可以得到一致的顺序。
+
+    CRDB使用HLC(hybird-logical clock)解决两个问题：
+
+    1. 定义事务的因果和排序
+
+    2. 使逻辑时钟与walltime的偏差收敛
+    
+    详细请看 `HLC paper <http://www.cse.buffalo.edu/tech-reports/2014-04.pdf>`_ .
+
 
 
 Overview
@@ -95,10 +105,17 @@ Overview
 - Span
     表示[startKey, endKey)范围内的所有key, Span可以跨越任意Ranges.
 
-- conflict
+.. _Transaction Conflict:
+
+- Transaction Conflict
     有如下情况：
-    1. 对于发生于t1的read, 在mvcc中遇到t2的value或intent, t1接近t2且t1 < t2, 由于跨节点时钟不同步，该read被认为发生在uncertainty window, 返回ReadWithinUncertaintyIntervalError.
-    2. 对于发生于t1的read, 在mvcc中遇到t0的intent, 且t1 > t0. 
+
+    1. 发生于t1时txn1的read, 在mvcc中遇到t2执行的txn2所属value或intent, t1接近t2且t1 < t2, 由于clock skew，该read被认为发生在uncertainty window, 返回ReadWithinUncertaintyIntervalError.
+    2. 发生于t1时txn1的read, 在mvcc中遇到t0执行的txn2的intent, 且t1 > t0. 返回WriteIntentError.
+    3. txn1中的write, 在mvcc中遇到属于未提交txn2的intents. 返回WriteIntentError.
+    4. 发生于t1时txn1的write, 遇到t2提交的tnx2所属value，且t1 < t2. 返回WriteTooOldError.
+    5. 发生于t1时txn1的write, 遇到t2时执行的txn2所属read，且t1 < t2. 返回TransactionRetryError(reason=RETRY_SERIALIZABLE).
+
 
 子系统
 ========
@@ -155,19 +172,55 @@ timestamp Cache
 tsCache内部同样区分读写cache, 它们对应的范围：
 
 - rCache对应：
-    GetRequest, ScanRequest等读操作
-    ConditionalPutRequest, InitPutRequest, IncrementRequest等CAS操作
-    RefreshRequest, RefreshRangeRequest(作用于读操作)
-    PushTxnRequest(read/write conflict, push timestamp)
+   - GetRequest, ScanRequest等读操作
+   - ConditionalPutRequest, InitPutRequest, IncrementRequest等CAS操作
+   - RefreshRequest, RefreshRangeRequest(作用于读操作)
+   - PushTxnRequest(read/write conflict, push timestamp)
 
 - wCache
-    由于MVCC存放了timestamp信息，写操作不会更新tsCache. DeleteRangeRequest是个例外, 因为在key不存在的情况下并不会在MVCC中写入tombstone(考虑[0, ∞)会产生无数个墓碑)
-    RefreshRequest, RefreshRangeRequest(作用于写操作，即DeleteRangeRequest)
-    EndTransactionRequest
-    PushTxnRequest(write/write conflict, push abort)
+   - 由于MVCC存放了timestamp信息，写操作不会更新tsCache. DeleteRangeRequest是个例外, 因为在key不存在的情况下并不会在MVCC中写入tombstone(考虑[0, ∞)会产生无数个墓碑)
+   - RefreshRequest, RefreshRangeRequest(作用于写操作，即DeleteRangeRequest)
+   - EndTransactionRequest
+   - PushTxnRequest(write/write conflict, push abort)
 
-TsCache的实现有skiplist, btree和llrbtree, 与latch manager区别在于cache中的区间相互没有overlap. 
-TsCache位于memory, 因此cache设置了low water mark 限制item数量，之前的timestamp不会放入cache, 旧的timestamp通过FIFO或LRU进行eviction.
+|   TsCache的实现有skiplist, btree和llrbtree, 与latch manager区别在于cache中的区间相互没有overlap. 
+|   TsCache存放在内存, 因此cache设置了low water mark 限制item数量，之前的timestamp不会放入cache, 通过FIFO或LRU进行evict过量的timestamp.
+
+Transaction timestamp
+-----------------------
+
+CockroacbDB在Trasaction中定义了以下时间戳：
+
+.. code::
+
+    type Transaction struct {
+      
+      // 由gateway node分配，OrigTimestamp = hlc.Clock.Now()
+      OrigTimestamp hlc.Timestamp
+
+      // MaxTimestamp = OrigTimestamp + clock skew
+      // 用于定义初始的uncertainty window = [OrigTimestamp, MaxTimestamp)
+      MaxTimestamp hlc.Timestamp
+
+      // 由于transaction conflict
+      // 会尝试在server侧挑选一个合适的timestamp重试，即RefreshedTimestamp
+      RefreshedTimestamp hlc.Timestamp
+
+      // Transaction计划使用的提交时间
+      // 会因为各种原因被forward, 如closedts, tscache或read push
+      // 被push后，Transaction计划使用的提交时间需要retry(RETRY_SERIALIZABLE)
+      Timestamp hlc.Timestamp
+
+    }
+
+Transaction queue
+-----------------
+
+|   \ `Transaction Conflict`_\ 中的情况②与③会在当前节点触发push.
+|   发送PushTxnRequest尝试push timestamp(read/write)或push abort(write/write)所遭遇intents所属的txn.
+|   若因为pusher priority <= pushee priority等原因push失败，pushee进入TxnQueue.
+|   pusher进入select loop, 同时追踪(poll)pusher和pushee的状态，等待pushee进入COMMITTED, ABORTED, EXPIRED或与pusher形成死锁。
+|   如果形成死锁，具有更高priority的一方使用force push杀死另一方。
 
 Transaction之旅
 ================
@@ -218,3 +271,24 @@ Transaction之旅
       NULL      | /112821 |       62 | {1,2,3}  |            2
       /112821   | /225420 |       72 | {1,2,3}  |            1
       /225420   | NULL    |       73 | {1,2,3}  |            3
+
+123
+
+.. code::
+    
+                  ╔═══════════╗
+                  ║ go reader ║
+                  ╚═════════╤═╝
+                            │
+                            │
+     ┌──────────────────────┼┐
+     │                       ┃
+     │        StmtBuf        ┃
+     │                       ┃
+     └───────────────────────┘
+    
+    
+    ╔═══════════╗
+    ║ go reader ║
+    ╚═════════╤═╝
+    
