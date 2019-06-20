@@ -64,9 +64,9 @@ Overview
 
 .. figure:: images/sql-overview.png
 
-   图1:sql overview (来源: pathToCockroachSrc/src/github.com/cockroachdb/cockroach/docs/tech-notes/sql/sql-overview.png)
+   sql overview (来源: pathToCockroachSrc/src/github.com/cockroachdb/cockroach/docs/tech-notes/sql/sql-overview.png)
 
-图1展示了SQL执行的流程，涵盖了CRDB的5个layer：
+上图展示了SQL执行的流程，涵盖了CRDB的5个layer：
 
 1. `SQL <https://www.cockroachlabs.com/docs/stable/architecture/sql-layer.html>`_ 解析SQL，并生成可执行的flow
 2. `Transactional <https://www.cockroachlabs.com/docs/stable/architecture/transaction-layer.html>`_ 确保transaction的ACID特性
@@ -81,6 +81,7 @@ Overview
 - Range
     CRDB切分数据的基本单元。Range的大小维持在一个区间，默认为16MB~64MB。达到上限将触发split; 反之，则触发merge.
     Range同样是replica的基本单元，Range的多份replicas中有且仅有一个Leaseholder.
+    Range中的行按升序排列。
 
 - Leaseholder
     负责处理对应Range的所有Read和Write操作。
@@ -91,6 +92,82 @@ Overview
 - Raft Leader & Raft log
     参考 `etcd notes <../etcd/etcd.rst>`_
 
+- Span
+    表示[startKey, endKey)范围内的所有key, Span可以跨越任意Ranges.
+
+- conflict
+    有如下情况：
+    1. 对于发生于t1的read, 在mvcc中遇到t2的value或intent, t1接近t2且t1 < t2, 由于跨节点时钟不同步，该read被认为发生在uncertainty window, 返回ReadWithinUncertaintyIntervalError.
+    2. 对于发生于t1的read, 在mvcc中遇到t0的intent, 且t1 > t0. 
+
+子系统
+========
+
+closed timestamp
+----------------
+
+用于实现follower read功能( `AS OF SYSTEM TIME <https://www.cockroachlabs.com/docs/v19.1/as-of-system-time.html#select-historical-data-time-travel>`_)
+若满足：对于read请求时间ts, closedts >= ts, 那么read可以在follower节点完成。
+
+.. code::
+
+        closed           next
+          |          left | right
+          |               |
+          |               |
+          v               v
+    ---------------------------------------------------------> time
+    图摘自tracker.go
+
+cockroach周期性地尝试close next, 时间轴被分为三个区域：
+
+1. (-∞, closed] : closed之前的状态immutable.
+2. (closed, next]: left sets中包含next之前提交的proposal, 该集合不能添加新proposal
+3. (next, ∞]: right sets中包含next之后提交的proposal, 可以添加新proposal
+
+latch manager
+-------------
+
+每个range replica包含lgmanager, 内部使用interval-btree维护行锁和区间锁，使用多个btree区分读写锁。
+
+
+锁的临界区包含：
+
+- Timestamp Cache的读写
+    Timestamp Cache同样以区间的形式维护
+
+- MVCC的写入
+    写入values(non-transaction或1PC)、intents(2PC)
+
+- raft log finish application
+
+latch manager使用copy-on-write提高自身并发访问性能，区间锁的获取过程如下：
+
+1. manager.Lock
+2. 拷贝一份btree, 作为snapshot返回
+3. 插入自己要访问的一组锁lg(下一个请求需要acquire snapshot和lg的并集)
+4. manager.Unlock
+5. 对于snapshot和lg的overlaps, 阻塞等待直至overlaps都被释放。
+
+timestamp Cache
+---------------
+
+tsCache内部同样区分读写cache, 它们对应的范围：
+
+- rCache对应：
+    GetRequest, ScanRequest等读操作
+    ConditionalPutRequest, InitPutRequest, IncrementRequest等CAS操作
+    RefreshRequest, RefreshRangeRequest(作用于读操作)
+    PushTxnRequest(read/write conflict, push timestamp)
+
+- wCache
+    由于MVCC存放了timestamp信息，写操作不会更新tsCache. DeleteRangeRequest是个例外, 因为在key不存在的情况下并不会在MVCC中写入tombstone(考虑[0, ∞)会产生无数个墓碑)
+    RefreshRequest, RefreshRangeRequest(作用于写操作，即DeleteRangeRequest)
+    EndTransactionRequest
+    PushTxnRequest(write/write conflict, push abort)
+
+TsCache的实现有skiplist, btree和llrbtree, 与latch manager区别在于cache中的区间相互没有overlap. 
+TsCache位于memory, 因此cache设置了low water mark 限制item数量，之前的timestamp不会放入cache, 旧的timestamp通过FIFO或LRU进行eviction.
 
 Transaction之旅
 ================
