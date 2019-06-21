@@ -189,6 +189,8 @@ tsCache内部同样区分读写cache, 它们对应的范围：
 Transaction timestamp
 -----------------------
 
+.. _Transaction timestamp:
+
 CockroacbDB在Trasaction中定义了以下时间戳：
 
 .. code::
@@ -210,6 +212,9 @@ CockroacbDB在Trasaction中定义了以下时间戳：
       // 会因为各种原因被forward, 如closedts, tscache或read push
       // 被push后，Transaction计划使用的提交时间需要retry(RETRY_SERIALIZABLE)
       Timestamp hlc.Timestamp
+
+      // Transaction被各节点observed的时间，用于缩小uncertainty window
+      ObservedTimestamps []ObservedTimestamp
 
     }
 
@@ -403,15 +408,19 @@ Transactional layer
 
 1. txnHeartbeater: 针对slow query, 确认transaction的liveness
 
+.. _txnSeqNumAllocator:
+
 2. **txnSeqNumAllocator**: 分配给每一个write唯一的序列号，read操作的序号和最近的write有相同序列号
 
 3. txnIntentCollector: EndTransactionRequest执行时，将transaction中所有write intents附着，确保提交时都resolved
 
 4. txnPipeliner: 用于追踪开启pipelinedWritesEnabled(未开启)选项后，确保后续重叠操作和提交前asyncConsensus都已完成(通过附加QueryIntentRequest)
 
+.. _MindTheGap:
+
 5. **txnSpanRefresher**: 实现transaction的auto-retry
-    - 针对 \ `Transaction Conflict`_\ 的情况 ①, ④, ⑤ downstream layer返回错误的同时，附带一枚可以refresh的timestamp, transaction将其作为RefreshedTimestamp去尝试refresh.
-    - 截止该失败操作前的每一个refreshable spans(GetRequest, ScanRequest或DeletaRangeRequest等), 发送 RefreshRequest/RefreshRangeRequest
+    - 针对 \ `Transaction Conflict`_\ 的情况 ①, ④, ⑤ downstream layer返回错误的同时，附带一枚可以refresh的timestamp, transaction将其作为RefreshedTimestamp去尝试refresh, 仅仅重试当前batch.
+    - 截止该失败操作前的每一个refreshable spans(GetRequest, ScanRequest或DeletaRangeRequest等), 发送 RefreshRequest/RefreshRangeRequest. 
     
     .. code::
 
@@ -448,6 +457,8 @@ Transactional layer
           +-----------------------------------------+
                                 +----------->
                                       5
+    
+    - 如果refresh未成功，那么retry旧不可避免。
         
 6. txnCommitter: 目前尚未完成
 
@@ -459,3 +470,234 @@ Transactional layer
 Distribution layer
 ------------------
 
+.. code::
+
+                                                                    +--------------------------+
+                                                                    |meta        +---------+   |
+                                                                    |            | +-----+ |   |
+                                                                    |        +---> |meta2| |   |
+                                                                    |        |   | +-----+ |   |
+                                                                    | +------+   |  node1  |   |
+                                                                    | | meta1|   | +-----+ |   |
+                           +--------------------+                   | +----------> |meta2| |   |
+                           |                    |  lookup ranges    |            | +-----+ |   |
+                           |     DistSender     +------------------>+            +---------+   |
+                           |                    |                   |            | +-----+ |   |
+                           +--------+------+----+                   | +----------> |meta2| |   |
+                                    |      |                        | | meta1|   | +-----+ |   |
+                                    |  d   |                        | +------+   |  node2  |   |
+                                    |  i   |                        |        |   | +-----+ |   |
+                                    |  s   |                        |        +---> |meta2| |   |
+                                    |  p   |                        |            | +-----+ |   |
+                                    |  a   |                        |            +---------+   |
+                                    |  t   |                        |                          |
+                                    |  c   |                        +--------------------------+
+                     +--------------+  h   +-------------------+
+    +-----------------------------------+     +-----------------------------------+
+    |                |                  |     |                |                  |
+    |    +-----------v------------+     |     |    +-----------v------------+     |
+    |    |        stores          |     |     |    |        stores          |     |
+    |    ++-----+-----+-----+-----+     |     |    ++-----+-----+-----+-----+     |
+    |     |     |     |     |     |     |     |     |     |     |     |     |     |
+    |   +-v-+ +-v-+ +-v-+ +-v-+ +-v-+   |     |   +-v-+ +-v-+ +-v-+ +-v-+ +-v-+   |
+    |   | r | | r | | r | | r | | r |   |     |   | r | | r | | r | | r | | r |   |
+    |   | a | | a | | a | | a | | a |   |     |   | a | | a | | a | | a | | a |   |
+    |   | n | | n | | n | | n | | n |   |     |   | n | | n | | n | | n | | n |   |
+    |   | g | | g | | g | | g | | g |   |     |   | g | | g | | g | | g | | g |   |
+    |   | e | | e | | e | | e | | e |   |     |   | e | | e | | e | | e | | e |   |
+    |   +-+-+ +-+-+ +-+-+ +-+-+ +-+-+   |     |   +-+-+ +-+-+ +-+-+ +-+-+ +-+-+   |
+    |     |     |     |     |     |     |     |     |     |     |     |     |     |
+    |     v     v     v     v     v     |     |     v     v     v     v     v     |
+    |   +-+-----+-----+-----+-----+-+   |     |   +-+-----+-----+-----+-----+-+   |
+    |   |       rocksdb mvcc        |   |     |   |       rocksdb mvcc        |   |
+    |   +---------------------------+   |     |   +---------------------------+   |
+    +-----------------------------------+     +-----------------------------------+
+
+
+|   CRDB通过Meta Range定位数据存放节点。
+|   Meta Range为二级索引结构，分为meta1和meta2. 每个节点拥有完整的meta1.
+|   meta2分布于所有节点。
+|   详见 `Meta range <https://www.cockroachlabs.com/docs/stable/architecture/transaction-layer.html>`_
+|   位于相同node的所有操作组成batch发送到对应节点。
+
+
+.. code::
+
+    Orig                       Max                                                             
+      +                         +                                                              
+      |                         |                                                              
+      |    Orig + clock skew    |                                                              
+      |                         |                                                              
+      v                         v                                                              
+      +-------------------------+                                                              
+      |                         |                                                              
+      |       ScanRequest       |                                                                                   
+      |                         |                                                                                   
+      +-------------------------+                                
+      |                 /^                                                                                          
+       \               / |                                                 
+        \             /  |                                                                                          
+         \  actual   /   +                                  
+         uncertainty     Observed by node                       
+            window   
+
+BatchRequest到达所属node后，node记录接收batch的时间，减少uncertainty window： \ `Transaction timestamp`_\
+
+根据操作keyRange所属rangeDescriptor, node再派发给各个range replica.
+
+只读操作比较简单，不包含raft log写入：
+
+.. code::
+
+                            +a
+                            |c R
+                            |q l
+                            |u o
+                            |i c
+                            |r k
+                            |e
+    +------------------------------------------------+
+    | latches               |                        |
+    |                       |                        |
+    |                       v                        |
+    |          +------------+------------+           |
+    |          |                         |           |
+    |          |   access MVCC storage   |           |
+    |          |                         |           |
+    |          +------------+------------+           |
+    |                       |                        |
+    |                       |                        |
+    |                       |                        |
+    |                       v                        |
+    |          +------------+------------+           |
+    |          |                         |           |
+    |          | update timestamp rcache |           |
+    |          |                         |           |
+    |          +------------+------------+           |
+    |                       |                        |
+    |                       v                        |
+    +------------------------------------------------+
+    executeReadOnlyBatch    |r
+                            |e R
+                            |l l
+                            |e o
+                            |a c
+                            |s k
+                            |e
+                            v
+
+包含写操作的Batch需要访问closedts, tscache查看是否需要refresh, 并apply raft log:
+
+.. code::
+
+
+                               +a
+                               |c
+                               |q l
+                               |u o
+                               |i c
+                               |r k
+                               |e
+       +-----------------------------------------------+
+       | latches               |                       |
+       |                       |                       |
+       |          +------------v-----------+           |
+       |          |     get minTS from     +-------------+
+       |          |        closedts        |           | |
+       |          +------------------------+           | |
+       |                       |                       | |
+       |                       |                       | |                +------------------+
+       |          +------------v-----------+           | v pushed         |   need refresh   |
+       |          | apply timestampcache   +----------------------------->+     or retry     |
+       |          +------------------------+           | ^                |   must use 2pc   |
+       |                       |                       | |                +------------------+
+       |                       |                       | |
+       |          +------------v-----------+ tooOld    | |
+       |          |  access MVCC storage   +-------------+
+       |          +------------------------+           |
+       |                       |                       |
+       |                       |                       |
+       |          +------------v-----------+           |
+       |          |     submit propose     |           |
+       |          |           &&           |           |
+       |          |  wait for application  |           |
+       |          +------------------------+           |
+       |                       |                       |
+       |                       |                       |
+       |          +------------v-----------+           |
+       |          | update timestamp rcache|           |
+       |          +------------------------+           |
+       |                       |                       |
+       |                       |                       |
+       |                       |                       |
+       +-----------------------------------------------+
+       executeReadOnlyBatch    |r
+                               |e
+                               |l l
+                               |e o
+                               |a c
+                               |s k
+                               |e
+                               v
+
+CRDB对于implicit transaction进行了1PC优化，只要满足下列条件：
+
+.. code::
+
+  func isOnePhaseCommit(ba roachpb.BatchRequest, knobs *StoreTestingKnobs) bool {
+    if ba.Txn == nil {
+      return false
+    }
+    if !ba.IsCompleteTransaction() {
+      return false
+    }
+    arg, _ := ba.GetArg(roachpb.EndTransaction)
+    etArg := arg.(*roachpb.EndTransactionRequest)
+    if batcheval.IsEndTransactionExceedingDeadline(ba.Txn.Timestamp, *etArg) {
+      return false
+    }
+    if retry, _, _ := batcheval.IsEndTransactionTriggeringRetryError(ba.Txn, *etArg); retry {
+      return false
+    }
+    return !knobs.DisableOptional1PC || etArg.Require1PC
+  }
+
+1. 包含EndTransactionRequest, 且 \ `txnSeqNumAllocator`_\所分配的所有序列号都在该batch, 即所有写操作分布在同一Range
+2. Txn还没有过期(默认4分钟)
+3. Txn从未retry, 这意味着 txn.OrigTimestamp == txn.Timestamp
+4. 没有显式关闭优化(默认开启)
+
+1PC没有commit阶段，没有intents，不需要维护txnMeta, 大大提高了效率。以下是一些示例：
+
+.. code::
+
+    // X 使用了显式transaction, batch不包含EndTransactionRequest, 即使一次性将transaction完整发送。
+    begin; update gecko set gid = 999 where key=166666; commit;
+
+    // X 5和166666不在同一Range
+    update gecko set gid = 999 where key in (5, 166666);
+
+    // √ 尽管使用subquery会生成同步的两阶段plan, 且8和499999不在同一node. 但写操作仅仅只有499999
+    with a as (select gid from gecko where key=8) update gecko set gid=(select gid from a) where key = 499999;
+
+
+**Commit阶段**
+
+未能满足1PC的Transaction必须进行Commit：
+
+1. 确保所有writeIntents resolved, 比如 \ `MindTheGap`_\中， PutRequest需要forward到txn.Timestamp在MVCC中检查是否存在冲突
+2. 确保未被push abort.
+3. 确保Txn.Timestamp == lastRefreshedTimestamp(如果refresh未发生过，即 OrigTimestamp). closedts, tsCache和push timestamp都会导致Txn.Timestamp > lastRefreshedTimestamp, 这种情况下必须retry
+
+
+关于retry
+----------
+
+1. Auto-retry, 适用的情况是： implicit tranasction或一次性发送完整transaction
+2. client-side-retry：如果任意读操作的结果泄露给客户端，那么auto-retry不可能再满足serializable一致性，返回 40001 / "retry transaction" 给客户端。
+
+
+Storage layer
+-------------
+
+CRDB的存储使用了基于RocksDB的MVCC
