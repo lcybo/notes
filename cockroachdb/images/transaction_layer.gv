@@ -1,0 +1,14 @@
+digraph "Transactional layer" {
+
+  "Distribution layer" [shape=box]
+
+
+  subgraph "cluster_txn_coord" {
+    node [shape=box]
+    label="TxnCoordSender"
+    {rank = same; txnHeartbeater -> txnSeqNumAllocator -> txnIntentCollector -> txnPipeliner -> txnSpanRefresher -> txnCommitter -> txnMetricRecorder -> txnLockGatekeeper}
+    
+  }
+  
+  txnLockGatekeeper -> "Distribution layer"
+}

@@ -221,6 +221,7 @@ Transaction queue
 |   若因为pusher priority <= pushee priority等原因push失败，pushee进入TxnQueue.
 |   pusher进入select loop, 同时追踪(poll)pusher和pushee的状态，等待pushee进入COMMITTED, ABORTED, EXPIRED或与pusher形成死锁。
 |   如果形成死锁，具有更高priority的一方使用force push杀死另一方。
+|   其他情况下发送resolveIntentRequest确保intents都resolved. 再尝试commit或retry.
 
 Transaction之旅
 ================
@@ -241,8 +242,8 @@ Transaction之旅
 - 配置一组CRDB cluster：
 
 1. 在IDE中启动第一个node,启动参数如下：
-    Environment: COCKROACH_DISTSQL_LOG_PLAN=true  (设置该参数可输出SQL执行计划URL)
-    Arguments: start --insecure --listen-addr=192.168.1.101:26257 --logtostderr=INFO
+    - Environment: COCKROACH_DISTSQL_LOG_PLAN=true  (设置该参数可输出SQL执行计划URL)
+    - Arguments: start --insecure --listen-addr=192.168.1.101:26257 --logtostderr=INFO
 2. 增加两个node：
 
 .. code::
@@ -272,23 +273,189 @@ Transaction之旅
       /112821   | /225420 |       72 | {1,2,3}  |            1
       /225420   | NULL    |       73 | {1,2,3}  |            3
 
-123
+Connection
+----------
 
 .. code::
     
-                  ╔═══════════╗
-                  ║ go reader ║
-                  ╚═════════╤═╝
-                            │
-                            │
-     ┌──────────────────────┼┐
-     │                       ┃
-     │        StmtBuf        ┃
-     │                       ┃
-     └───────────────────────┘
+               +------------------+
+               | reader goroutine |
+               +------------------+
+                                  |
+                                  |
+                                  v
+    +-----------------------------+
+    |           stmtBuf           |
+    +-+---------------------------+
+      ^
+      |
+      |
+     ++--------------------+
+     | processor goroutine |
+     +---------------------+
+
+对于每个client connection
+    1. server使用一个reader goroutine读取client端发送的statement, 放入stmtBuf.
+    2. 另一个processor goroutine依次执行stmtBuf中的statement
+
+SQL layer
+---------
+
+SQL layer解析statement为AST nodes, planner分析nodes生成优化后的logicalPlan和physicalPlan.
+由于设置了COCKROACH_DISTSQL_LOG_PLAN=true与--logtostderr=INFO, 执行计划会输出在终端，例：
+
+.. code::
+
+    select * from gecko where key=299999;
+    // 输出 https://cockroachdb.github.io/distsqlplan/decode.html#eJyMT7FKBDEU7P0KGdvI7tqZyvYaldNOtojJsCzu5YW8LChH_l12I4iFcGnCzLw3M--MKIGP7kSFfcOA0SBl8VSVvFFt4BA-YXuDOaa1bPRo4CUT9owyl4WweHXvC490gbnrYRBY3LzstinPJ5e_Hib6D4HBS3JR7XV3d7-925-_u8FYDWQtvyFa3ETYoZrLixypSaLyT4f_nPs6GjBMbMeqrNnzOYvfYxp82vd2IlBLU4cGDrFJdaxX3wEAAP__epRsmg==
+
+将url输入浏览器，得到：
+
+.. figure:: images/scan_1.PNG
+
+    简单查询
+
+更多例子：
+
+.. code::
+
+    select count(1) from gecko;
+
+.. figure:: images/dist_1.PNG
+
+    使用分布式查询
+
+**需要说明的是，只有ReadOnly操作才会分派到其他节点执行**
+
+.. code::
+
+    update gecko set gid = 222 where key = 299999;
+
+.. figure:: images/put_1.PNG
+
+    更新记录
+
+|   可以观察到，尽管statement只更新了一个字段，但是整行记录都被读取到gateway node.
+|   这是因为Storage layer的实现是rocksDB, API基于key(主键)-value(其他所有字段)，所有操作粒度都是基于行。
+|   由此可见，CRDB并不适用于大批量更新操作的场景(例：每行更新少量字段)
+
+
+.. code::
+
+    delete from gecko where key in (3, 299998);
+
+.. figure:: images/delete_1.PNG
+
+    指定主键的delete是个例外，使用了DeleteRange
+
+使用DeleteRange的条件：
+
+.. code:: 
+
+    func (b *Builder) canUseDeleteRange(del *memo.DeleteExpr) bool {
+      // delete 语句使用了RETURING返回删除的结果
+      if del.NeedResults() {
+      	return false
+      }
+      tab := b.mem.Metadata().Table(del.Table)
+      if tab.DeletableIndexCount() > 1 {
+      	// 使用了第二索引
+      	return false
+      }
+      if tab.IsInterleaved() {
+      	// 使用了INTERLEAVE IN PARENT, INTERLEAVE 将子表记录插入父表Range, 提升join与cascade性能
+      	return false
+      }
+      if tab.IsReferenced() {
+      	// 作为外键被引用
+      	return false
+      }
+      // 使用了limit或其他原因
+      if scan, ok := del.Input.(*memo.ScanExpr); !ok || scan.HardLimit != 0 {
+      	return false
+      }
+      return true
+    }
+
+
+statement可能生成多个root plan node:
+
+.. code:: 
+
+    // 从句
+    with b as(select gid from gecko where key=5) update gecko set gid = (select gid from b)+66 where key=155555;
+
+.. figure:: images/subquery_1.PNG
+
+    先执行从句
+
+.. figure:: images/mainquery_1.PNG
+
+    从句的输出作为主句输入
+
+
+Transactional layer
+-------------------
+
+.. figure:: images/transaction_layer.png
+
+    rootTxn的Transaction layer
+
+1. txnHeartbeater: 针对slow query, 确认transaction的liveness
+
+2. **txnSeqNumAllocator**: 分配给每一个write唯一的序列号，read操作的序号和最近的write有相同序列号
+
+3. txnIntentCollector: EndTransactionRequest执行时，将transaction中所有write intents附着，确保提交时都resolved
+
+4. txnPipeliner: 用于追踪开启pipelinedWritesEnabled(未开启)选项后，确保后续重叠操作和提交前asyncConsensus都已完成(通过附加QueryIntentRequest)
+
+5. **txnSpanRefresher**: 实现transaction的auto-retry
+    - 针对 \ `Transaction Conflict`_\ 的情况 ①, ④, ⑤ downstream layer返回错误的同时，附带一枚可以refresh的timestamp, transaction将其作为RefreshedTimestamp去尝试refresh.
+    - 截止该失败操作前的每一个refreshable spans(GetRequest, ScanRequest或DeletaRangeRequest等), 发送 RefreshRequest/RefreshRangeRequest
     
-    
-    ╔═══════════╗
-    ║ go reader ║
-    ╚═════════╤═╝
-    
+    .. code::
+
+        Orig     refresh1    refresh2    refresh3
+          +          +          +           +
+          |          |          |           |
+          |          |          |           |
+          |          |          |           |
+          |          |          |           |
+          v          v          v           v
+          +----------+----------+-----------+-------+
+          |              Scan request               |
+          +-----------------------------------------+
+          +---------->---------->----------->
+            refresh1   refresh2    refresh3
+        
+        
+          +-----------------------------------------+
+          |              Put  request               |
+          +-----------------------------------------+
+          +---------->                     /
+               4      \                   /
+                       -- mind the gap ---
+        
+          +-----------------------------------------+
+          |              Scan request               |
+          +-----------------------------------------+
+                     +---------->----------->
+                          1        refresh3
+        
+        
+          +-----------------------------------------+
+          |              Put  request               |
+          +-----------------------------------------+
+                                +----------->
+                                      5
+        
+6. txnCommitter: 目前尚未完成
+
+7. txnMetricRecorder: metrics相关
+
+8. txnLockGatekeeper: 确保所有interceptor在持有锁的情况下执行
+
+
+Distribution layer
+------------------
+
