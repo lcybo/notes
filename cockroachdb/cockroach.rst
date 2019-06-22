@@ -63,7 +63,7 @@ Spanner和TrueTime
 
     1. 定义事务的因果和排序
 
-    2. 使逻辑时钟与walltime的偏差收敛
+    2. 使逻辑时钟与walltime的偏差具有上界
     
     详细请看 `HLC paper <http://www.cse.buffalo.edu/tech-reports/2014-04.pdf>`_ .
 
@@ -140,7 +140,7 @@ cockroach周期性地尝试close next, 时间轴被分为三个区域：
 
 1. (-∞, closed] : closed之前的状态immutable.
 2. (closed, next]: left sets中包含next之前提交的proposal, 该集合不能添加新proposal
-3. (next, ∞]: right sets中包含next之后提交的proposal, 可以添加新proposal
+3. (next, ∞): right sets中包含next之后提交的proposal, 可以添加新proposal
 
 latch manager
 -------------
@@ -183,7 +183,7 @@ tsCache内部同样区分读写cache, 它们对应的范围：
    - EndTransactionRequest
    - PushTxnRequest(write/write conflict, push abort)
 
-|   TsCache的实现有skiplist, btree和llrbtree, 与latch manager区别在于cache中的区间相互没有overlap. 
+|   TsCache的实现有skiplist, btree和llrbtree, 与latch manager区别在于cache中的spans相互之间没有overlaps. 
 |   TsCache存放在内存, 因此cache设置了low water mark 限制item数量，之前的timestamp不会放入cache, 通过FIFO或LRU进行evict过量的timestamp.
 
 Transaction timestamp
